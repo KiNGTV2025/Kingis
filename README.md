@@ -1,0 +1,2 @@
+# Kingis
+Otomatik oluşturuldu
