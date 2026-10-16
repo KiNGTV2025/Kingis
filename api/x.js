@@ -52,22 +52,41 @@ module.exports = async (req, res) => {
   const ac = new AbortController();
   res.on('close', () => ac.abort());
 
+  // Sunucular bazen UA'ya göre 403 verir → sırayla farklı istemci kimlikleri denenir.
+  const UAS = [ua, 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36', 'okhttp/4.12.0', 'ExoPlayerLib/2.18.7', 'Lavf/60.3.100'];
+  const debug = q.get('debug') === '1';
+  const chain = [];
+  const red = u => String(u).replace(/(\/(?:live|movie|series)\/[^/]+\/)[^/]+/, '$1***').replace(/(password=)[^&]+/, '$1***');
   let cur = target, up = null;
   try {
-    for (let i = 0; i < 6; i++) {
-      up = await fetch(cur, { method: req.method, headers, redirect: 'manual', signal: ac.signal });
-      if (up.status >= 300 && up.status < 400 && up.headers.get('location')) {
-        const nx = new URL(up.headers.get('location'), cur);
-        if (!allowed(nx)) { res.statusCode = 403; return res.end('yönlendirme izin yok'); }
-        try { up.body && up.body.cancel(); } catch (e) {}
-        cur = nx; continue;
+    for (let k = 0; k < UAS.length; k++) {
+      headers['User-Agent'] = UAS[k];
+      cur = target; up = null;
+      for (let i = 0; i < 6; i++) {
+        up = await fetch(cur, { method: req.method, headers, redirect: 'manual', signal: ac.signal });
+        chain.push({ ua: k, url: red(cur), status: up.status, server: up.headers.get('server') || '', cf: up.headers.get('cf-ray') ? 1 : 0, location: red(up.headers.get('location') || '') });
+        if (up.status >= 300 && up.status < 400 && up.headers.get('location')) {
+          const nx = new URL(up.headers.get('location'), cur);
+          if (!allowed(nx)) { res.statusCode = 403; return res.end('yönlendirme izin yok'); }
+          try { up.body && up.body.cancel(); } catch (e) {}
+          cur = nx; continue;
+        }
+        break;
       }
-      break;
+      if (up.status !== 403 && up.status !== 401 && up.status !== 458 && up.status !== 509) break;
+      if (k < UAS.length - 1) { try { up.body && up.body.cancel(); } catch (e) {} }
     }
   } catch (e) {
     if (ac.signal.aborted) return;
-    res.statusCode = 502; return res.end('kaynak hatası: ' + String(e && e.message || e).slice(0, 120));
+    if (debug) { res.setHeader('Content-Type', 'application/json'); return res.end(JSON.stringify({ error: String(e && e.message || e), cause: String(e && e.cause && (e.cause.code || e.cause.message) || ''), chain })); }
+    res.statusCode = 502; return res.end('kaynak hatası: ' + String(e && e.message || e).slice(0, 120) + ' ' + String(e && e.cause && (e.cause.code || e.cause.message) || '').slice(0, 60));
   }
+  if (debug) {
+    let bodyTxt = ''; try { bodyTxt = (await up.text()).slice(0, 200); } catch (e) {}
+    res.setHeader('Content-Type', 'application/json');
+    return res.end(JSON.stringify({ final: red(cur), status: up.status, type: up.headers.get('content-type') || '', body: bodyTxt, chain }));
+  }
+  if (up.status >= 400) res.setHeader('X-Upstream-Status', String(up.status));
 
   const ct = up.headers.get('content-type') || '';
   const isM3u8 = /mpegurl/i.test(ct) || /\.m3u8($|\?)/i.test(cur.pathname + cur.search);
